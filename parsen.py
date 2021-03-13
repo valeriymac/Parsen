@@ -1,10 +1,7 @@
 import numpy as np
 import pandas as pd
-from collections import Counter
-import math
 from sklearn.model_selection import LeaveOneOut
 from sklearn.model_selection import KFold
-import matplotlib.pyplot as plt
 
 
 class ParameterSelector:
@@ -22,6 +19,26 @@ class ParameterSelector:
                 par = Parsen(self.kernel, n_neighbours=k)
             else:
                 par = Parsen(self.kernel, h=k)
+            sum = 0
+            for train_index, test_index in self.method.split(X):
+                X_train, X_test = X[train_index], X[test_index]
+                y_train, y_test = y[train_index], y[test_index]
+                par.fit(X_train, y_train, X_test)
+                pre = par.predict()
+                for n in range(len(pre)):
+                    if pre[n] != y_test[n]:
+                        sum += pre[n]
+                par.clear()
+            print(sum)
+            sums.append(sum)
+        return sums
+
+    def get_parameter_ker(self, X, y, start, stop, step):
+        sums = []
+        kers = ['rectangular', 'triangular', 'epanechnikov', 'quartic', 'gaussian']
+        self.rng = np.arange(start, stop, step)
+        for k in kers:
+            par = Parsen(kernel=k)
             sum = 0
             for train_index, test_index in self.method.split(X):
                 X_train, X_test = X[train_index], X[test_index]
@@ -51,7 +68,7 @@ class KFold_search(ParameterSelector):
 
 
 class Parsen:
-    def __init__(self, kernel='rectangular', h=None, n_neighbours=5):
+    def __init__(self, kernel='rectangular', h=None, n_neighbours=3):
         """
         PARAMETERS:
         n_neighbours - number of nearest neighbors
@@ -62,27 +79,21 @@ class Parsen:
         self.kernel = kernel
         self.n_neighbours = n_neighbours
 
-        self.X_train = None
         self.y_train = None
         self.y_count = []
         self.l_y = None
         self.density = []
         self.h = h
         self.length = []
-        if h is None:
-            self.change_h = True
-        else:
-            self.change_h = False
 
-    def get_weight(self, r):
+    def kern(self, r):
         """
-        INPUT:
-        r - kernel parameter
+            INPUT:
+            r - kernel parameter
 
-        OUTPUT:
-        w - weight for neighbour
+            OUTPUT:
+            w - kernel output
         """
-
         w = 0
         if self.kernel == 'rectangular':
             w = (r <= 1) / 2
@@ -97,106 +108,135 @@ class Parsen:
             w = (2 * np.pi) ** (-0.5) * np.exp(-0.5 * r ** 2)
         return w
 
-    def fit(self, X_train, y_train, X_test):
-        """
-        INPUT:
-        X_train - np.array of shape (l, d)
-        y_train - np.array of shape (l,)
-
-        OUTPUT:
-        y_count - list of dictionaries with classes in keys
-        and sum by class in values
-        """
-        min_X = min(X_train)
-        max_X = max(X_train)
-        self.X_train = (X_train - min_X)/(max_X - min_X)
-        self.X_test = (X_test - min_X)/(max_X - min_X)
+    def fit(self, X_train, y_train=None, X_test=None):
+        self.X_train = X_train
         self.y_train = y_train
-        self.l_y = Counter(y_train)
+        self.X_test = X_test
 
-        for i in self.X_test:
-            neighbours = []
-            sum_by_class = {'len': 0}
-            for j in self.X_train:
-                neighbours.append(math.sqrt(np.sum((j - i) ** 2)))
-            if self.change_h:
-                index = np.argsort(neighbours)[:self.n_neighbours + 1]
-                self.h = neighbours[index[-1]] + 0.0000001
-            else:
-                index = np.argsort(neighbours)
-            for t in index[:-1]:
-                if neighbours[t] <= self.h:
-                    sum_by_class['len'] += 1
-                    if y_train[t] in sum_by_class:
-                        sum_by_class[y_train[t]] += self.get_weight(neighbours[t] / self.h)
-                    else:
-                        sum_by_class[y_train[t]] = self.get_weight(neighbours[t] / self.h)
-            self.y_count.append(sum_by_class)
-            for obj in self.y_count:
-                self.length.append(obj.pop('len', self.n_neighbours))
+        self.l = len(X_train)
 
-        return self.y_count
+    def get_estimation(self, x_inp):
+        """
+            INPUT:
+            x_inp - x axis
 
-    def get_density(self):
-        for n, obj in enumerate(self.y_count):
-            self.density.append(sum(obj.values()) / self.length[n])
+            OUTPUT:
+            densities - estimation
+        """
+        densities = []
+        if self.h is not None:
+            v = 0
+            for x in x_inp:
+                v += self.kern(np.linalg.norm(x - self.X_train[0]) / self.h)
+            for x in x_inp:
+                p = 0
+                for x_i in self.X_train:
+                    p += self.kern(np.linalg.norm(x - x_i) / self.h)
+                densities.append(p / (self.l * v))
+        else:
+            v = 0
+            for x in x_inp:
+                v += self.kern(np.linalg.norm(x - self.X_train[0]) / self.h)
+            for x in x_inp:
+                p = 0
+                distances = [np.linalg.norm(x - x_i) for x_i in self.X_train]
+                h = sorted(distances)[self.n_neighbours + 1]
+                for x_i in self.X_train:
+                    p += self.kern(np.linalg.norm(x - x_i) / h)
+                densities.append(p / (self.l * v))
+        return densities
+
+    def get_estimation_by_class(self, x_inp, y):
+        """
+            INPUT:
+            x_inp - x axis
+            y - class
+            OUTPUT:
+            densities - estimation by class
+        """
+        densities = []
+        if self.h is not None:
+            for x in x_inp:
+                p = 0
+                n = 0
+                for i in range(self.l):
+                    if self.y_train[i] == y:
+                        n += 1
+                        p += self.kern(np.linalg.norm(x - self.X_train[i]) / self.h)
+                densities.append(p)
+        else:
+            for x in x_inp:
+                p = 0
+                distances = [np.linalg.norm(x - x_i) for x_i in self.X_train]
+                h = sorted(distances)[self.n_neighbours + 1]
+                n = 0
+                for i in range(self.l):
+                    if self.y_train[i] == y:
+                        n += 1
+                        p += self.kern(np.linalg.norm(x - self.X_train[i]) / h)
+                densities.append(p / n)
+        return densities
+
+    def get_estimation_by_classes(self):
+        pre_predictions = []
+        self.y_set = sorted(list(set(self.y_train)))
+        for y in self.y_set:
+            pre_predictions.append(self.get_estimation_by_class(self.X_test, y))
+        return pre_predictions
 
     def predict(self):
         """
-        INPUT:
-        none
+            INPUT:
+            none
 
-        OUTPUT:
-        y_pred - np.array of shape (m,)
+            OUTPUT:
+            y_pred - np.array of shape (m,)
         """
-        y_pred = []
-        for dct in self.y_count:
-            for key in dct:
-                p_y = self.l_y[key] / self.y_train.shape[0]
-                dct[key] = dct[key] * p_y / self.l_y[key]
-            result = sorted(dct, key=lambda x: dct.get(x), reverse=True)[0]
-            y_pred.append(result)
-        return np.array(y_pred)
+        y_predictions = []
+        pre_predictions = self.get_estimation_by_classes()
+        for i in range(len(self.X_test)):
+            density = [item[i] for item in pre_predictions]
+            y_predictions.append(self.y_set[density.index(max(density))])
+        return np.array(y_predictions)
 
     def clear(self):
-        self.y_count = []
-        self.density = []
-        self.length = []
+        self.l = []
 
-
+# Prediction example
 data = pd.read_csv("height_weight2.csv")
-heights = data['Height'].to_numpy()
-weights = data['Weight'].to_numpy()
+indexes = data['Index'].to_numpy()
+heights_weights = data[['Height', 'Weight']].to_numpy()
 
-heights = np.expand_dims(heights, axis=1)
+X_train, y_train = heights_weights, indexes
 
-X_train, y_train = heights, weights
+data = pd.read_csv("height_weight_test.csv")
+X_test = data[['Height', 'Weight']].to_numpy()
+X_test_answers = data['Index'].to_numpy()
 
-loo = LOO_search(kernel='epanechnikov', neighbours=True)
-sums = loo.get_parameter(heights, weights, start=1, stop=500, step=10)
-plt.plot(np.arange(1, 500, 10), sums)
-plt.show()
+classifier = Parsen(kernel='gaussian', h=2.5)
+classifier.fit(X_train, y_train, X_test)
 
-best_h = sums.index(min(sums))
+print('Real answers:', X_test_answers)
+print('Prediction:', classifier.predict())
 
 '''
-pred = []
-classifier = Parsen(kernel='epanechnikov', h=best_h)
-classifier.fit(X_train, y_train, np.array([[170.]]))
-classifier.get_density()
-pred = classifier.predict()
-print(pred)
-'''
-'''
-X_test = np.array([np.array([x]) for x in range(150, 190)])
-parsen = Parsen(X_test, kernel='epanechnikov', h=0.6)
-parsen.fit(X_train, y_train)
-parsen.get_density()
-pred = {}
+#KFold EXAMPLE
+data = pd.read_csv("height_weight2.csv")
+qualities = data['Index'].to_numpy()
+components = data[['Height', 'Weight']].to_numpy()
 
-for n in range(len(X_test)):
-    pred[X_test[n][0]] = parsen.density[n]
-plt.plot(pred.keys(), pred.values())
-plt.plot(pred.keys(), pred.values())
+X_train, y_train = components, qualities
+
+data = pd.read_csv("height_weight_test.csv")
+X_test = data[['Height', 'Weight']].to_numpy()
+
+classifier = Parsen(kernel='gaussian', h=2.5)
+classifier.fit(X_train, y_train, X_test)
+
+print(classifier.predict())
+
+loo = KFold_search(5, neighbours=False, kernel='gaussian')
+sums = loo.get_parameter(X_train, y_train, start=0.5, stop=5.5, step=1)
+plt.plot(range(0.5, 5.5, 1), sums)
 plt.show()
 '''
